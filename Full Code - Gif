@@ -1,0 +1,119 @@
+# Install and load necessary libraries
+if (!requireNamespace("reticulate", quietly = TRUE)) { install.packages("reticulate") }
+if (!requireNamespace("ggplot2", quietly = TRUE)) { install.packages("ggplot2") }
+if (!requireNamespace("dplyr", quietly = TRUE)) { install.packages("dplyr") }
+if (!requireNamespace("caret", quietly = TRUE)) { install.packages("caret") }
+if (!requireNamespace("gganimate", quietly = TRUE)) { install.packages("gganimate") }
+if (!requireNamespace("gifski", quietly = TRUE)) { install.packages("gifski") }
+if (!requireNamespace("png", quietly = TRUE)) { install.packages("png") }
+if (!requireNamespace("magick", quietly = TRUE)) { install.packages("magick") }
+
+library(reticulate)
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(gganimate)
+library(gifski)
+library(png)
+library(magick)
+
+# Specify the correct path to the Anaconda bin directory
+conda <- "C:/Users/Brooke/anaconda3/Scripts/conda.exe"
+
+# Use the newly created environment
+use_condaenv("kaggle-env", conda = conda, required = TRUE)
+kaggle <- import("kaggle")
+
+# Authenticate Kaggle
+kaggle$api$authenticate()
+
+# Ensure the dataset directory exists
+dir.create("dataset", showWarnings = FALSE)
+
+# Download the dataset
+kaggle$api$dataset_download_files("aaronschlegel/austin-animal-center-shelter-outcomes-and", path = "dataset", unzip = TRUE)
+
+# List files in the dataset directory
+print(list.files("dataset"))
+
+# Load the dataset
+path <- "dataset/aac_shelter_outcomes.csv"
+dataset <- read.csv(path)
+
+# Filter for dogs and select specified columns
+selected_vars <- dataset %>%
+  filter(animal_type == "Dog") %>%
+  select(age_upon_outcome, animal_type, outcome_type, outcome_subtype, sex_upon_outcome)
+
+# Rename the outcome_type column for clarity
+names(selected_vars)[names(selected_vars) == "outcome_type"] <- "Adopted"
+selected_vars$Adopted <- ifelse(selected_vars$Adopted == "Adoption", 1, 0)
+
+# Convert relevant columns to factors
+selected_vars$age_upon_outcome <- as.factor(selected_vars$age_upon_outcome)
+selected_vars$outcome_subtype <- as.factor(selected_vars$outcome_subtype)
+selected_vars$sex_upon_outcome <- as.factor(selected_vars$sex_upon_outcome)
+selected_vars$Adopted <- as.factor(selected_vars$Adopted)
+
+# Exclude NULL and Unknown values in 'sex_upon_outcome'
+selected_vars <- selected_vars %>%
+  filter(sex_upon_outcome != "NULL" & sex_upon_outcome != "Unknown")
+
+# Convert age_upon_outcome to years with improved handling
+selected_vars <- selected_vars %>%
+  mutate(age_in_years = case_when(
+    grepl("year", age_upon_outcome) ~ as.numeric(gsub(" years?", "", age_upon_outcome)),
+    grepl("month", age_upon_outcome) ~ as.numeric(gsub(" months?", "", age_upon_outcome)) / 12,
+    grepl("week", age_upon_outcome) ~ as.numeric(gsub(" weeks?", "", age_upon_outcome)) / 52,
+    grepl("day", age_upon_outcome) ~ as.numeric(gsub(" days?", "", age_upon_outcome)) / 365,
+    TRUE ~ NA_real_
+  ))
+
+# Handle NAs that might be introduced
+selected_vars <- selected_vars %>% filter(!is.na(age_in_years))
+
+# Split the data into training and testing sets
+set.seed(123)  # for reproducibility
+trainIndex <- createDataPartition(selected_vars$Adopted, p = .8, list = FALSE, times = 1)
+TrainData <- selected_vars[trainIndex,]
+TestData <- selected_vars[-trainIndex,]
+
+# Ensure factor levels are consistent
+TrainData$age_upon_outcome <- factor(TrainData$age_upon_outcome, levels = levels(selected_vars$age_upon_outcome))
+TrainData$outcome_subtype <- factor(TrainData$outcome_subtype, levels = levels(selected_vars$outcome_subtype))
+TrainData$sex_upon_outcome <- factor(TrainData$sex_upon_outcome, levels = levels(selected_vars$sex_upon_outcome))
+TestData$age_upon_outcome <- factor(TestData$age_upon_outcome, levels = levels(selected_vars$age_upon_outcome))
+TestData$outcome_subtype <- factor(TestData$outcome_subtype, levels = levels(selected_vars$outcome_subtype))
+TestData$sex_upon_outcome <- factor(TestData$sex_upon_outcome, levels = levels(selected_vars$sex_upon_outcome))
+
+# Remove columns with only one unique value
+filtered_TrainData <- TrainData[, sapply(TrainData, function(x) length(unique(x)) > 1)]
+
+# Train a simplified model (Logistic Regression)
+model <- train(Adopted ~ age_upon_outcome + sex_upon_outcome + outcome_subtype, data = filtered_TrainData, method = "glm", family = "binomial")
+
+# Predict the probability of adoption
+prob_predictions <- predict(model, newdata = TestData, type = "prob")
+
+# Add predictions to TestData
+TestData$Adopted_Prob <- prob_predictions[, "1"]
+
+# Create average age and sex data for animation
+average_age_sex <- TestData %>%
+  group_by(sex_upon_outcome, age_in_years) %>%
+  summarise(avg_prob = mean(Adopted_Prob), .groups = 'drop')
+
+# Visualize the predictions as a gif
+anim <- ggplot(average_age_sex, aes(x = age_in_years, y = avg_prob, color = sex_upon_outcome)) +
+  geom_line(size = 1.5) +
+  geom_point(size = 3) +
+  labs(x = "Age in Years", y = "Probability of Adoption", title = "Probability of Dog Adoption by Age and Sex") +
+  theme_minimal() +
+  transition_reveal(age_in_years)
+
+# Save the gif
+anim_save("predictions.gif", animation = anim)
+
+# Display the gif
+gif <- image_read("predictions.gif")
+print(gif)
